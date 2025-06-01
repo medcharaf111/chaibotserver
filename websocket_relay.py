@@ -4,7 +4,7 @@ import os
 
 clients = set()
 
-async def handler(websocket, path):
+async def handler(websocket, *args):
     print(f"New connection: {websocket.remote_address}")
     clients.add(websocket)
     print(f"Total clients: {len(clients)}")
