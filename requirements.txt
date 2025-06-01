@@ -1,1 +1,2 @@
 # No external dependencies needed for this server 
+websockets 
