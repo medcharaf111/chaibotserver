@@ -16,9 +16,11 @@ async def handler(websocket, path):
         clients.remove(websocket)
 
 PORT = int(os.environ.get("PORT", 10000))
-start_server = websockets.serve(handler, "0.0.0.0", PORT)
 
-print(f"WebSocket relay server listening on port {PORT}")
+async def main():
+    print(f"WebSocket relay server listening on port {PORT}")
+    async with websockets.serve(handler, "0.0.0.0", PORT):
+        await asyncio.Future()  # run forever
 
-asyncio.get_event_loop().run_until_complete(start_server)
-asyncio.get_event_loop().run_forever() 
+if __name__ == "__main__":
+    asyncio.run(main()) 
