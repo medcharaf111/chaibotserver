@@ -5,15 +5,22 @@ import os
 clients = set()
 
 async def handler(websocket, path):
+    print(f"New connection: {websocket.remote_address}")
     clients.add(websocket)
+    print(f"Total clients: {len(clients)}")
     try:
         async for message in websocket:
-            # Relay the message to all other clients
+            print(f"Received: {message}")
             for client in clients:
                 if client != websocket:
+                    print(f"Relaying to: {client.remote_address}")
                     await client.send(message)
+    except Exception as e:
+        print(f"Exception: {e}")
     finally:
         clients.remove(websocket)
+        print(f"Connection closed: {websocket.remote_address}")
+        print(f"Total clients: {len(clients)}")
 
 PORT = int(os.environ.get("PORT", 10000))
 
