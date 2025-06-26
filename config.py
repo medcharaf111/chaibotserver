@@ -5,7 +5,7 @@ from typing import Dict, Any
 class FaceRecognitionConfig:
     """Configuration for the face recognition system"""
     # GPU settings
-    use_gpu: bool = True
+    use_gpu: bool = False  # Set to False; GPU is not required for backend operation
     gpu_id: int = 0
     
     # Recognition settings
