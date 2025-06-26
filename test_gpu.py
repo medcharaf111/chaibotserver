@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for GPU support and system functionality
+Test script for system functionality (GPU code removed)
 """
 
 import sys

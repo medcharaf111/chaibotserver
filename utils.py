@@ -7,29 +7,6 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-def check_gpu_availability() -> bool:
-    """Check if CUDA GPU is available"""
-    try:
-        import onnxruntime as ort
-        providers = ort.get_available_providers()
-        return 'CUDAExecutionProvider' in providers
-    except ImportError:
-        logger.warning("ONNX Runtime not available")
-        return False
-
-def get_gpu_info() -> dict:
-    """Get GPU information"""
-    try:
-        import onnxruntime as ort
-        providers = ort.get_available_providers()
-        gpu_info = {
-            'cuda_available': 'CUDAExecutionProvider' in providers,
-            'providers': providers
-        }
-        return gpu_info
-    except ImportError:
-        return {'cuda_available': False, 'providers': []}
-
 def resize_image(image: np.ndarray, max_size: int = 1024) -> np.ndarray:
     """Resize image while maintaining aspect ratio"""
     height, width = image.shape[:2]
