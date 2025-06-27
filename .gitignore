@@ -26,4 +26,7 @@ faceapp/downloads/
 Silent-Face-Anti-Spoofing-master/saved_logs/
 
 # Ignore large model/data files if not needed
-*.zip 
+*.zip
+
+# Ignore the frontend directory
+snap-share-remember-me/ 
