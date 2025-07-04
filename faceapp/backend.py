@@ -16,6 +16,14 @@ from email.utils import formataddr
 import zipfile
 import uuid
 import threading
+from dotenv import load_dotenv
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+import boto3
+import botocore
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
+import aioboto3
 
 app = Flask(__name__)
 CORS(app)
@@ -34,35 +42,83 @@ class VideoFaceRecognizer:
         self.known_faces = {}
         self.known_face_embeddings = []
         self.known_face_names = []
-        self.load_known_faces(images_folder)
+        self.load_known_faces()
         self.lock = Lock()
 
-    def load_known_faces(self, images_folder="images"):
+    def load_known_faces(self):
+        import io
         import os
+        import botocore
+        import asyncio
+        import aioboto3
         supported_formats = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
         self.known_faces = {}
         self.known_face_embeddings = []
         self.known_face_names = []
-        for filename in os.listdir(images_folder):
-            if any(filename.lower().endswith(fmt) for fmt in supported_formats):
-                image_path = os.path.join(images_folder, filename)
-                image = cv2.imread(image_path)
-                if image is None:
-                    continue
-                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                faces = self.app.get(rgb_image)
-                if len(faces) > 0:
-                    face = faces[0]
-                    embedding = face.embedding
-                    person_name = os.path.splitext(filename)[0]
-                    self.known_faces[person_name] = {
-                        'embedding': embedding,
-                        'image_path': image_path
-                    }
-                    self.known_face_embeddings.append(embedding)
-                    self.known_face_names.append(person_name)
+        # DigitalOcean Spaces credentials from .env
+        spaces_key = os.environ.get('DO_SPACE_KEY')
+        spaces_secret = os.environ.get('DO_SPACE_SECRET')
+        spaces_region = os.environ.get('DO_SPACE_REGION')
+        spaces_endpoint = os.environ.get('DO_SPACE_ENDPOINT')
+        spaces_bucket = os.environ.get('DO_SPACE_NAME')
+        session = boto3.session.Session()
+        config = botocore.config.Config(read_timeout=10, connect_timeout=5)
+        s3 = session.client(
+            's3',
+            region_name=spaces_region,
+            endpoint_url=spaces_endpoint,
+            aws_access_key_id=spaces_key,
+            aws_secret_access_key=spaces_secret,
+            config=config
+        )
+        # List objects in the bucket
+        response = s3.list_objects_v2(Bucket=spaces_bucket)
+        image_keys = [obj['Key'] for obj in response.get('Contents', []) if any(obj['Key'].lower().endswith(fmt) for fmt in supported_formats)]
 
-    def recognize_face(self, face_embedding, threshold=0.4):
+        async def download_image(s3_async, bucket, key):
+            try:
+                logger.info(f"Async downloading image from bucket: {key}")
+                obj = await s3_async.get_object(Bucket=bucket, Key=key)
+                img_bytes = await obj['Body'].read()
+                return key, img_bytes
+            except Exception as e:
+                logger.error(f"Failed to async download {key}: {e}")
+                return key, None
+
+        async def download_all_images(keys, bucket, s3_config):
+            async with aioboto3.Session().client('s3', **s3_config) as s3_async:
+                tasks = [download_image(s3_async, bucket, key) for key in keys]
+                return await asyncio.gather(*tasks)
+
+        s3_config = {
+            'region_name': spaces_region,
+            'endpoint_url': spaces_endpoint,
+            'aws_access_key_id': spaces_key,
+            'aws_secret_access_key': spaces_secret,
+            'config': config
+        }
+        image_data = asyncio.run(download_all_images(image_keys, spaces_bucket, s3_config))
+        for key, img_bytes in image_data:
+            if img_bytes is None:
+                continue
+            image = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                logger.warning(f"Failed to decode image: {key}")
+                continue
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            faces = self.app.get(rgb_image)
+            if len(faces) > 0:
+                face = faces[0]
+                embedding = face.embedding
+                person_name = os.path.splitext(os.path.basename(key))[0]
+                self.known_faces[person_name] = {
+                    'embedding': embedding,
+                    'image_path': key
+                }
+                self.known_face_embeddings.append(embedding)
+                self.known_face_names.append(person_name)
+
+    def recognize_face(self, face_embedding, threshold=0.25):
         if len(self.known_face_embeddings) == 0:
             return None, 0
         similarities = []
@@ -133,11 +189,11 @@ class VideoFaceRecognizer:
                     cv2.circle(frame, (x, y), 2, (255, 0, 0), -1)
         return frame
 
+load_dotenv()
+
 # Singleton recognizer
 recognizer = VideoFaceRecognizer()
 
-GMAIL_USER = 'tutifytest@gmail.com'
-GMAIL_PASS = 'bkpiqehtbfbpkajx'
 DOWNLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'downloads'))
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -287,6 +343,22 @@ def send_album():
             return jsonify({'summary': ['spoof_detected']})
         # Respond immediately to UI that processing has started
         def process_album_and_send_email(video_bytes, email):
+            import boto3
+            import os
+            import tempfile
+            spaces_key = os.environ.get('DO_SPACE_KEY')
+            spaces_secret = os.environ.get('DO_SPACE_SECRET')
+            spaces_region = os.environ.get('DO_SPACE_REGION')
+            spaces_endpoint = os.environ.get('DO_SPACE_ENDPOINT')
+            spaces_bucket = os.environ.get('DO_SPACE_NAME')
+            session = boto3.session.Session()
+            s3 = session.client(
+                's3',
+                region_name=spaces_region,
+                endpoint_url=spaces_endpoint,
+                aws_access_key_id=spaces_key,
+                aws_secret_access_key=spaces_secret
+            )
             temp_path = None
             try:
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as temp:
@@ -294,7 +366,7 @@ def send_album():
                     temp_path = temp.name
                 cap = cv2.VideoCapture(temp_path)
                 matched_names = set()
-                SIM_THRESHOLD = 0.4
+                SIM_THRESHOLD = 0.25
                 while True:
                     ret, frame = cap.read()
                     if not ret or frame is None:
@@ -322,21 +394,32 @@ def send_album():
                 zip_path = os.path.join(DOWNLOAD_DIR, zip_filename)
                 with zipfile.ZipFile(zip_path, 'w') as zipf:
                     for name in matched_names:
-                        img_path = recognizer.known_faces[name]['image_path']
-                        zipf.write(img_path, arcname=os.path.basename(img_path))
+                        img_key = recognizer.known_faces[name]['image_path']
+                        # Download from Spaces to a temp file
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(img_key)[1]) as temp_img:
+                            s3.download_fileobj(spaces_bucket, img_key, temp_img)
+                            temp_img_path = temp_img.name
+                        zipf.write(temp_img_path, arcname=os.path.basename(img_key))
+                        os.remove(temp_img_path)
                 # Generate download link
-                download_url = f"http://localhost:5000/download/{zip_filename}"
-                # Send email
-                msg = MIMEMultipart()
-                msg['From'] = formataddr(("FaceRec App", GMAIL_USER))
-                msg['To'] = email
-                msg['Subject'] = "Your FaceMatch Album Download Link"
-                body = f"Hello,\n\nYour personalized album is ready! Download it here: {download_url}\n\nBest regards,\nFaceRec Team"
-                msg.attach(MIMEText(body, 'plain'))
-                with smtplib.SMTP('smtp.gmail.com', 587) as server:
-                    server.starttls()
-                    server.login(GMAIL_USER, GMAIL_PASS)
-                    server.send_message(msg)
+                download_url = f"http://152.42.187.216:5000/download/{zip_filename}"
+                # Send email using SendGrid
+                try:
+                    sg = SendGridAPIClient(os.environ.get('SENDGRID_API_KEY'))
+                    message = Mail(
+                        from_email='noreply@sg.seamo-official.org',
+                        to_emails=email,
+                        subject='Your FaceMatch Album Download Link',
+                        html_content=f"""
+                        <p>Hello,</p>
+                        <p>Your personalized album is ready! Download it here: <a href='{download_url}'>{download_url}</a></p>
+                        <p>Best regards,<br>FaceRec Team</p>
+                        """
+                    )
+                    response = sg.send(message)
+                    print(f"SendGrid response: {response.status_code}")
+                except Exception as e:
+                    print(f"SendGrid error: {str(e)}")
             except Exception as e:
                 print(f"Error in background album/email processing: {e}")
             finally:
@@ -359,5 +442,76 @@ def download_zip(zipname):
         return "File not found", 404
     return send_from_directory(DOWNLOAD_DIR, zipname, as_attachment=True)
 
+@app.route('/pushimage', methods=['POST'])
+def push_image():
+    import boto3
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    spaces_key = os.environ.get('DO_SPACE_KEY')
+    spaces_secret = os.environ.get('DO_SPACE_SECRET')
+    spaces_region = os.environ.get('DO_SPACE_REGION')
+    spaces_endpoint = os.environ.get('DO_SPACE_ENDPOINT')
+    spaces_bucket = os.environ.get('DO_SPACE_NAME')
+    session = boto3.session.Session()
+    s3 = session.client(
+        's3',
+        region_name=spaces_region,
+        endpoint_url=spaces_endpoint,
+        aws_access_key_id=spaces_key,
+        aws_secret_access_key=spaces_secret
+    )
+    supported_formats = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+    files = request.files.getlist('images')
+    uploaded = []
+    for file in files:
+        filename = file.filename
+        if not any(filename.lower().endswith(fmt) for fmt in supported_formats):
+            continue
+        s3.upload_fileobj(file, spaces_bucket, filename)
+        uploaded.append(filename)
+    if uploaded:
+        recognizer.load_known_faces()
+    return jsonify({'uploaded': uploaded})
+
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--pushimage":
+        import boto3
+        from dotenv import load_dotenv
+        load_dotenv()
+        import os
+        spaces_key = os.environ.get('DO_SPACE_KEY')
+        spaces_secret = os.environ.get('DO_SPACE_SECRET')
+        spaces_region = os.environ.get('DO_SPACE_REGION')
+        spaces_endpoint = os.environ.get('DO_SPACE_ENDPOINT')
+        spaces_bucket = os.environ.get('DO_SPACE_NAME')
+        session = boto3.session.Session()
+        s3 = session.client(
+            's3',
+            region_name=spaces_region,
+            endpoint_url=spaces_endpoint,
+            aws_access_key_id=spaces_key,
+            aws_secret_access_key=spaces_secret
+        )
+        supported_formats = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+        # If additional args are given, treat them as image paths
+        image_paths = sys.argv[2:] if len(sys.argv) > 2 else []
+        if not image_paths:
+            print("No image files specified. Usage: python backend.py --pushimage image1.jpg image2.png ...")
+            sys.exit(1)
+        for file_path in image_paths:
+            if not os.path.isfile(file_path):
+                print(f"File not found: {file_path}")
+                continue
+            if not any(file_path.lower().endswith(fmt) for fmt in supported_formats):
+                print(f"Unsupported format: {file_path}")
+                continue
+            filename = os.path.basename(file_path)
+            print(f"Uploading {filename}...")
+            with open(file_path, 'rb') as f:
+                s3.upload_fileobj(f, spaces_bucket, filename)
+        print("Upload complete.")
+        sys.exit(0)
+    # Otherwise, run the Flask app
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True, use_reloader=False) 
